@@ -128,7 +128,13 @@ def main():
 
     S, N = Fnet.shape
     Ts_b = np.repeat(Ts[:, None], N, axis=1).astype(np.float32)
-    X = np.stack([T, logp, q, Ts_b], axis=-1)      # (S,N,4)
+    
+    c_top = logp[:, 0:1]
+    c_surf = logp[:, -1:]
+    c_tilde = (logp - c_top) / (c_surf - c_top + 1e-6)
+
+    X = np.stack([T, logp, c_tilde, q, Ts_b], axis=-1)  # (S,N,5)
+
     Y = Fnet[..., None]                             # (S,N,1)
 
     perm = rng.permutation(S)
@@ -155,7 +161,7 @@ def main():
 
     train_loader = DataLoader(TensorDataset(Xtr_t, Ytr_t, ctr_t), batch_size=args.batch, shuffle=True)
 
-    model = V1LocalGNO(in_dim=4, hidden=args.hidden, K=args.K, L=args.L).to(device)
+    model = V1LocalGNO(in_dim=5, hidden=args.hidden, K=args.K, L=args.L)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     loss_fn = nn.MSELoss()
 
@@ -198,7 +204,7 @@ def main():
                 "Y_mu": float(Y_mu.squeeze()),
                 "Y_std": float(Y_std.squeeze()),
                 "cfg": vars(args),
-                "features": ["T", "logp", "q", "Ts_broadcast"],
+                "features": ["T", "logp", "c_tilde", "q", "Ts_broadcast"],
                 "target": "Fnet",
             }, best_path)
 
