@@ -1,0 +1,6 @@
+ckpt: step4_v1_physfix_out/best_v1_physfix.pt
+data: test_N40_1000.npz
+features: ['T', 'logp', 'q', 'Ts_broadcast']
+profile_rmse: 3.951389
+toa_rmse: 0.834376
+boa_rmse: 17.991089

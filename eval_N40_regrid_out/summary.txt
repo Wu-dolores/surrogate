@@ -1,0 +1,6 @@
+ckpt: step4_v1_regrid_out/best_v1_regrid.pt
+data: test_N40_1000.npz
+features: ['T', 'logp', 'q', 'Ts_broadcast']
+profile_rmse: 2.979456
+toa_rmse: 0.678174
+boa_rmse: 3.948129

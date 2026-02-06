@@ -111,6 +111,11 @@ def main():
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--K", type=int, default=6)
     ap.add_argument("--L", type=int, default=4)
+
+    # BOA band loss hyperparams (match your ckpt script)
+    ap.add_argument("--m_bc", type=int, default=5)
+    ap.add_argument("--lam_bc", type=float, default=1.0)
+
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -120,22 +125,18 @@ def main():
     print(f"Using device: {device}")
 
     d = np.load(args.data, allow_pickle=True)
-    Ts = d["Ts_K"].astype(np.float32)         # (S,)
-    logp = d["logp_arr"].astype(np.float32)   # (S,N)
-    T = d["T_arr"].astype(np.float32)         # (S,N)
-    q = d["q_arr"].astype(np.float32)         # (S,N)
-    Fnet = d["Fnet_arr"].astype(np.float32)   # (S,N)
+    Ts   = d["Ts_K"].astype(np.float32)         # (S,)
+    logp = d["logp_arr"].astype(np.float32)     # (S,N)
+    T    = d["T_arr"].astype(np.float32)        # (S,N)
+    q    = d["q_arr"].astype(np.float32)        # (S,N)
+    Fnet = d["Fnet_arr"].astype(np.float32)     # (S,N)
 
     S, N = Fnet.shape
     Ts_b = np.repeat(Ts[:, None], N, axis=1).astype(np.float32)
-    
-    c_top = logp[:, 0:1]
-    c_surf = logp[:, -1:]
-    c_tilde = (logp - c_top) / (c_surf - c_top + 1e-6)
 
-    X = np.stack([T, logp, c_tilde, q, Ts_b], axis=-1)  # (S,N,5)
-
-    Y = Fnet[..., None]                             # (S,N,1)
+    # ---- OLD v1 MAINLINE FEATURES: [T, logp, q, Ts] ----
+    X = np.stack([T, logp, q, Ts_b], axis=-1).astype(np.float32)  # (S,N,4)
+    Y = Fnet[..., None].astype(np.float32)                        # (S,N,1)
 
     perm = rng.permutation(S)
     tr = perm[:int(0.8*S)]
@@ -144,9 +145,11 @@ def main():
     Xtr, Ytr, ctr = X[tr], Y[tr], logp[tr]
     Xva, Yva, cva = X[va], Y[va], logp[va]
 
-    # feature normalization (train stats)
-    X_mu, X_std = zfit(Xtr.reshape(-1, 4))
+    # ---- normalize with correct feature dim (4) ----
+    Fdim = X.shape[-1]
+    X_mu, X_std = zfit(Xtr.reshape(-1, Fdim))
     Y_mu, Y_std = zfit(Ytr.reshape(-1, 1))
+
     Xtrn = zapply(Xtr, X_mu, X_std)
     Xvan = zapply(Xva, X_mu, X_std)
     Ytrn = zapply(Ytr, Y_mu, Y_std)
@@ -156,16 +159,15 @@ def main():
     Ytr_t = torch.tensor(Ytrn, dtype=torch.float32)
     Xva_t = torch.tensor(Xvan, dtype=torch.float32)
     Yva_t = torch.tensor(Yvan, dtype=torch.float32)
-    ctr_t = torch.tensor(ctr, dtype=torch.float32)   # IMPORTANT: raw coord, not normalized
+    ctr_t = torch.tensor(ctr, dtype=torch.float32)   # IMPORTANT: raw coord
     cva_t = torch.tensor(cva, dtype=torch.float32)
 
-    train_loader = DataLoader(TensorDataset(Xtr_t, Ytr_t, ctr_t), batch_size=args.batch, shuffle=True)
+    train_loader = DataLoader(TensorDataset(Xtr_t, Ytr_t, ctr_t),
+                              batch_size=args.batch, shuffle=True)
 
-    model = V1LocalGNO(in_dim=5, hidden=args.hidden, K=args.K, L=args.L)
+    model = V1LocalGNO(in_dim=Fdim, hidden=args.hidden, K=args.K, L=args.L).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     loss_fn = nn.MSELoss()
-
-    # Simple ReduceLROnPlateau
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=10, verbose=True)
 
     outdir = "step4_v1_out"
@@ -173,7 +175,9 @@ def main():
     best = float("inf")
     best_path = os.path.join(outdir, "best_v1.pt")
 
-    # training loop
+    m = int(args.m_bc)
+    lam_bc = float(args.lam_bc)
+
     for ep in range(1, args.epochs+1):
         model.train()
         for xb, yb, cb in train_loader:
@@ -181,11 +185,8 @@ def main():
             opt.zero_grad(set_to_none=True)
             pred = model(xb, cb)
 
-            # Loss modification
-            m = 5
-            lam_bc = 1.0
-            Lf = loss_fn(pred, yb)
-            # BOA (Bottom Of Atmosphere) only
+            # Loss modification (exactly your snippet)
+            Lf  = loss_fn(pred, yb)
             Lbc = loss_fn(pred[:, -m:, :], yb[:, -m:, :])
             loss = Lf + lam_bc * Lbc
 
@@ -204,8 +205,9 @@ def main():
                 "Y_mu": float(Y_mu.squeeze()),
                 "Y_std": float(Y_std.squeeze()),
                 "cfg": vars(args),
-                "features": ["T", "logp", "c_tilde", "q", "Ts_broadcast"],
+                "features": ["T", "logp", "q", "Ts_broadcast"],
                 "target": "Fnet",
+                "losses": {"lam_bc": lam_bc, "m_bc": m},
             }, best_path)
 
         if ep % 10 == 0 or ep == 1:
@@ -214,20 +216,20 @@ def main():
 
     print(f"\nSaved best checkpoint: {best_path}  (best val prof RMSE={best:.3f} W/m^2)")
 
-    # --------- plots (random 5) ----------
-    # load best for plotting
+    # --------- quick plots (random 5 val) ----------
     ckpt = torch.load(best_path, map_location="cpu")
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
 
-    idx = rng.choice(Xva_t.shape[0], size=5, replace=False)
+    idx = rng.choice(Xva_t.shape[0], size=min(5, Xva_t.shape[0]), replace=False)
     with torch.no_grad():
         predn = model(Xva_t[idx].to(device), cva_t[idx].to(device)).cpu().numpy()
+
     pred = zinvert(predn, Y_mu, Y_std).squeeze(-1)
     true = zinvert(Yva_t[idx].cpu().numpy(), Y_mu, Y_std).squeeze(-1)
     coord = cva[idx]
 
-    # profile overlay
+    # overlay
     plt.figure()
     for i in range(true.shape[0]):
         plt.plot(coord[i], true[i], alpha=0.9)
@@ -235,18 +237,17 @@ def main():
     plt.gca().invert_xaxis()
     plt.xlabel("log(p) [ln(Pa)] (inverted)")
     plt.ylabel("Fnet (W/m^2)")
-    plt.title("Step4 v1: Fnet profiles (solid=true, dashed=pred)")
+    plt.title("Step4 v1 (mainline): Fnet profiles (solid=true, dashed=pred)")
     plt.savefig(os.path.join(outdir, "profiles_overlay.png"), dpi=160, bbox_inches="tight")
     plt.close()
 
-    # error vs height (mean abs error per level)
     mae_level = np.mean(np.abs(pred - true), axis=0)
     plt.figure()
     plt.plot(coord[0], mae_level)
     plt.gca().invert_xaxis()
     plt.xlabel("log(p) [ln(Pa)] (inverted)")
     plt.ylabel("Mean |error| (W/m^2)")
-    plt.title("Step4 v1: Mean abs error vs logp")
+    plt.title("Step4 v1 (mainline): Mean abs error vs logp")
     plt.savefig(os.path.join(outdir, "mae_vs_logp.png"), dpi=160, bbox_inches="tight")
     plt.close()
 
