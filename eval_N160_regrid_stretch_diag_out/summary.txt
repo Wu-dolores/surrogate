@@ -1,5 +1,0 @@
-RMSE_profile 3.381546
-RMSE_TOA 0.744800
-RMSE_BOA 6.397171
-N 160
-features T,logp,q,Ts_broadcast

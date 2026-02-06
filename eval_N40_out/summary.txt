@@ -1,6 +1,0 @@
-ckpt: step4_v1_out/best_v1.pt
-data: test_N40_1000.npz
-features: ['T', 'logp', 'q', 'Ts_broadcast']
-profile_rmse: 3.516502
-toa_rmse: 0.895308
-boa_rmse: 9.580608

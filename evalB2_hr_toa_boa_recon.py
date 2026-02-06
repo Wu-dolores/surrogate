@@ -119,13 +119,14 @@ class HR_TOA_BOA_Model(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden, 1),
         )
+        # Boundary heads now take (global_mean + boundary_local) -> hidden*2
         self.toa_head = nn.Sequential(
-            nn.Linear(hidden, hidden),
+            nn.Linear(hidden * 2, hidden),
             nn.SiLU(),
             nn.Linear(hidden, 1),
         )
         self.boa_head = nn.Sequential(
-            nn.Linear(hidden, hidden),
+            nn.Linear(hidden * 2, hidden),
             nn.SiLU(),
             nn.Linear(hidden, 1),
         )
@@ -136,12 +137,18 @@ class HR_TOA_BOA_Model(nn.Module):
             h = blk(h, coord)
         hr = self.hr_head(h)
         g = h.mean(dim=1)
-        f_toa = self.toa_head(g)
-        f_boa = self.boa_head(g)
+        
+        # Concat global context with local boundary context
+        # TOA: index 0, BOA: index -1
+        h_toa = h[:, 0, :]           # (B,H)
+        h_boa = h[:, -1, :]          # (B,H)
+        
+        f_toa = self.toa_head(torch.cat([g, h_toa], dim=-1))     # (B,1)
+        f_boa = self.boa_head(torch.cat([g, h_boa], dim=-1))     # (B,1)
         return hr, f_toa, f_boa
 
 @torch.no_grad()
-def predict_recon(model, Xn, logp, F_mu, F_std, H_mu, H_std,
+def predict_recon(model, Xn, logp, Ftoa_mu, Ftoa_std, Fboa_mu, Fboa_std, H_mu, H_std,
                   alpha_gamma, bot_window_k, batch, device):
     model.eval()
     S = Xn.shape[0]
@@ -153,10 +160,36 @@ def predict_recon(model, Xn, logp, F_mu, F_std, H_mu, H_std,
         hrn, ftoan, fboan = model(xb, cb)
 
         hr = (hrn.squeeze(-1).cpu().numpy() * H_std + H_mu).astype(np.float32)     # (B,N)
-        f_toa = (ftoan.squeeze(-1).cpu().numpy() * F_std + F_mu).astype(np.float32)
-        f_boa = (fboan.squeeze(-1).cpu().numpy() * F_std + F_mu).astype(np.float32)
+        f_toa = (ftoan.squeeze(-1).cpu().numpy() * Ftoa_std + Ftoa_mu).astype(np.float32)
+        f_boa = (fboan.squeeze(-1).cpu().numpy() * Fboa_std + Fboa_mu).astype(np.float32)
 
-        I = cumtrapz_batch_np(hr, logp[i:i+batch])                                 # (B,N)
+        # I = cumtrapz_batch_np(hr, logp[i:i+batch])                                 # (B,N)
+        
+        # Switch to Rectangular Integration (Cumsum) to better match finite difference training
+        # F_{i+1} = F_i + HR_i * dp_i
+        # This matches the forward difference HR = (F_{i+1}-F_i)/dp
+        # cumtrapz assumes HR is linear between points, but our HR is cell-averaged or point-wise difference.
+        
+        coord = logp[i:i+batch]
+        dcoord = np.diff(coord, axis=1) # (B, N-1)
+        # Pad dcoord to (B, N) - repeat last delta or use 0
+        # Better: use centered dcoord logic or just simple forward
+        # Let's try simple forward step integration
+        
+        # dF = HR * dp
+        # We need to broadcast or align.
+        # Let's assume HR[i] corresponds to the interval logp[i] -> logp[i+1]
+        
+        B, N = hr.shape
+        I = np.zeros((B, N), dtype=np.float32)
+        
+        # Try 1: Forward Euler
+        # F[i+1] = F[i] + HR[i] * (logp[i+1] - logp[i])
+        # This is essentially cumsum(HR[:-1] * diff(logp))
+        
+        inc = hr[:, :-1] * (coord[:, 1:] - coord[:, :-1])
+        I[:, 1:] = np.cumsum(inc, axis=1)
+        
         f_tilde = f_toa[:, None] + I                                               # anchor at TOA
         delta = f_boa - f_tilde[:, -1]                                             # enforce BOA
 
@@ -197,7 +230,16 @@ def main():
 
     X_mu = np.array(ckpt["X_mu"], dtype=np.float32).reshape(1, 1, in_dim)
     X_std = np.array(ckpt["X_std"], dtype=np.float32).reshape(1, 1, in_dim)
-    F_mu = float(ckpt["F_mu"]); F_std = float(ckpt["F_std"])
+    
+    # New separate normalization
+    if "Ftoa_mu" in ckpt:
+        Ftoa_mu = float(ckpt["Ftoa_mu"]); Ftoa_std = float(ckpt["Ftoa_std"])
+        Fboa_mu = float(ckpt["Fboa_mu"]); Fboa_std = float(ckpt["Fboa_std"])
+    else:
+        # fallback to old single F_mu
+        Ftoa_mu = float(ckpt["F_mu"]); Ftoa_std = float(ckpt["F_std"])
+        Fboa_mu = float(ckpt["F_mu"]); Fboa_std = float(ckpt["F_std"])
+        
     H_mu = float(ckpt["H_mu"]); H_std = float(ckpt["H_std"])
 
     model = HR_TOA_BOA_Model(in_dim=in_dim, hidden=hidden, K=K, L=L).to(device)
@@ -225,15 +267,20 @@ def main():
         "Ts_broadcast": Ts_b,
     }
 
-    if any(f in features for f in ["cwp", "rw", "cwp_norm", "rw_norm"]):
+    if any(f in features for f in ["cwp", "rw", "cwp_norm", "rw_norm", "tpw"]):
         cwp, rw = cwp_rw_from_q_logp_np(q, logp)
-        total = cwp[:, -1:] + 1e-6
-        cwp_n = cwp / total
-        rw_n  = rw  / total
+        total = cwp[:, -1:]
+        denom = total + 1e-6
+        cwp_n = cwp / denom
+        rw_n  = rw  / denom
         feat_map["cwp"] = cwp
         feat_map["rw"] = rw
         feat_map["cwp_norm"] = cwp_n.astype(np.float32)
         feat_map["rw_norm"]  = rw_n.astype(np.float32)
+        
+        # 'tpw' feature is the broadcasted total path
+        tpw_b = np.repeat(total, N, axis=1).astype(np.float32)
+        feat_map["tpw"] = tpw_b
 
 
     X_list = [feat_map[f] for f in features]
@@ -242,7 +289,7 @@ def main():
 
     pred = predict_recon(
         model, Xn, logp,
-        F_mu, F_std, H_mu, H_std,
+        Ftoa_mu, Ftoa_std, Fboa_mu, Fboa_std, H_mu, H_std,
         alpha_gamma=args.alpha_gamma,
         bot_window_k=args.bot_window_k,
         batch=args.batch,
