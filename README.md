@@ -167,10 +167,10 @@ python model_train.py --lr 5e-4 --loss_weights "1,2,2,0"
 If you use this code, please cite:
 
 ```bibtex
-@software{atmospheric_surrogate_2024,
+@software{atmospheric_surrogate_2026,
   title={Atmospheric Radiation Surrogate Model},
   author={Your Name},
-  year={2024},
+  year={2026},
   url={https://github.com/yourusername/surrogate}
 }
 ```
@@ -189,4 +189,4 @@ Contributions welcome! Please:
 
 ## Contact
 
-For questions or issues, please open a GitHub issue or contact [your.email@example.com]
+For questions or issues, please open a GitHub issue or contact dolores@stu.pku.edu.cn]
