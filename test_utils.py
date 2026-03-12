@@ -6,7 +6,7 @@ Run with: pytest test_utils.py
 
 import numpy as np
 import pytest
-from utils import (
+from module.utils import (
     zapply,
     zfit,
     cumtrapz_batch_np,

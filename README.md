@@ -171,21 +171,13 @@ If you use this code, please cite:
   title={Atmospheric Radiation Surrogate Model},
   author={Your Name},
   year={2026},
-  url={https://github.com/yourusername/surrogate}
+  url={https://github.com/Wu-dolores/surrogate}
 }
 ```
 
 ## License
 
 MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Submit a pull request
 
 ## Contact
 

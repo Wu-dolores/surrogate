@@ -7,7 +7,7 @@ import numpy.typing as npt
 from typing import Dict, Tuple
 from pathlib import Path
 
-from utils import (
+from module.utils import (
     enforce_toa_to_boa_numpy,
     cwp_rw_norm_from_q_logp_np,
     zfit,
